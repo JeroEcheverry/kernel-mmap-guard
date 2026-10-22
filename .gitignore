@@ -1,0 +1,15 @@
+# Artefactos de compilacion del modulo
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.symvers
+*.order
+.*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+# Binarios de las pruebas
+pruebas/prueba_mmap
+pruebas/carrera

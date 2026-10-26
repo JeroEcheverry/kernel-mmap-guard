@@ -19,7 +19,7 @@ que no lo pegamos tal cual: lo revisamos función por función y lo compilamos c
 `-Wall -Werror` para que no pasara ningún warning.
 
 **Casos de prueba.** La IA nos ayudó a listar qué ataques probar (escritura
-compartida, ejecución, el truco de `mprotect`, la carrera tipo Dirty COW). A
+compartida, ejecución, el truco de `mprotect`, una carrera inspirada en Dirty COW). A
 partir de esa lista escribimos `prueba_mmap.c` y `carrera.c`. Importante: las
 pruebas son **benignas**, no son exploits reales; solo verifican que la defensa
 responde como esperamos.

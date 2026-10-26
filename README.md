@@ -30,11 +30,14 @@ kernel-mmap-guard/
 ├── pruebas/               <- programas que simulan ataques
 │   ├── prueba_mmap.c      <- distintos tipos de mmap (lectura, escritura, exec...)
 │   ├── carrera.c          <- pruebas de condiciones de carrera
-│   └── correr_pruebas.sh  <- carga el modulo y corre todo
+│   ├── correr_pruebas.sh  <- carga el modulo y corre todo
+│   ├── benchmark.c        <- mide el tiempo de mmap y page faults
+│   └── medir_overhead.sh  <- compara con y sin modulo
 └── docs/                  <- las 3 partes del parcial
     ├── parte1_preguntas.md
     ├── parte2_ia.md
-    └── parte3_implementacion.md
+    ├── parte3_implementacion.md
+    └── guia_pruebas_manual.md   <- como probar todo a mano
 ```
 
 ## Cómo se usa

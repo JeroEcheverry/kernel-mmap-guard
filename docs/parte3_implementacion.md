@@ -15,6 +15,7 @@ Todo el código está en el repositorio:
   - `prueba_mmap.c`: prueba cada tipo de mapeo.
   - `carrera.c`: pruebas de condiciones de carrera (benignas).
   - `correr_pruebas.sh`: compila, carga el módulo, corre todo y lo descarga.
+  - `benchmark.c` y `medir_overhead.sh`: miden el costo extra del módulo.
 
 ### Cómo funciona la intercepción (resumen)
 
@@ -33,7 +34,7 @@ lectura sobre `handle_mm_fault()` para contar los page faults.
 
 ### Validación de permisos
 
-Las reglas están en `politica.c::aplicar_reglas()`:
+Las reglas están en `politica_revisar()` en `politica.c`:
 
 1. Nunca se permite `PROT_EXEC` (apoya el bit NX, evita ejecutar código inyectado).
 2. Nunca se permite `MAP_SHARED + PROT_WRITE` (escritura persistente al disco).
@@ -75,9 +76,24 @@ Tabla resumen de lo que esperábamos:
 
 ### Medición de impacto (overhead)
 
-El sobrecosto que agrega el módulo se puede medir con `perf` o `strace -T`
-comparando el tiempo de un `mmap()` con y sin el módulo cargado. El trabajo
-extra por cada `mmap()` sobre un archivo protegido es:
+Para medirlo usamos `pruebas/benchmark.c` y el script
+`pruebas/medir_overhead.sh` (`sudo ./medir_overhead.sh`). El benchmark mide
+el tiempo promedio de un `mmap()`+`munmap()` y de tocar una página (lo que
+provoca page faults) en tres casos:
+sin módulo (A), con módulo sobre un archivo no protegido (B) y con módulo
+sobre el archivo protegido (C). Si `perf` está instalado, el script también
+corre `perf stat -e page-faults`.
+
+| Caso | mmap+munmap (ns) | por página tocada (ns) |
+|------|------------------|-----------------|
+| A. sin módulo | <!-- llenar --> | <!-- llenar --> |
+| B. con módulo, archivo no protegido | <!-- llenar --> | <!-- llenar --> |
+| C. con módulo, archivo protegido | <!-- llenar --> | <!-- llenar --> |
+
+Overhead = (C − A) / A. <!-- llenar con el resultado y comentarlo -->
+
+Lo que esperamos ver, según lo que hace el código. El trabajo extra por cada
+`mmap()` sobre un archivo protegido es:
 
 - comparar el inodo contra la lista (unas pocas comparaciones enteras),
 - revisar las banderas,
@@ -89,12 +105,11 @@ y sale de inmediato (`return 1`), así que el impacto es mínimo. El kprobe sobr
 sistema; por eso ahí no hacemos nada más que comparar el inodo y sumar un
 contador atómico.
 
-Comando sugerido para medir (incluido como referencia):
+Para ver una sola llamada a mano también sirve `strace -T`, que muestra entre
+`< >` cuánto tardó cada `mmap()`:
 
 ```bash
-# sin modulo
 strace -T -e trace=mmap ./pruebas/prueba_mmap /tmp/secreto.txt lectura
-# con modulo cargado, repetir y comparar el tiempo entre < >
 ```
 
 ### Limitaciones y trabajo futuro
@@ -105,12 +120,17 @@ Lo que esta solución **no** cubre todavía:
    autorizado lee datos sensibles, quedan en claro en su memoria. Trabajo
    futuro: integrar con `fscrypt`.
 2. **Identificación por inodo.** Si el archivo se borra y se vuelve a crear,
-   cambia el inodo y hay que recargar el módulo. Una versión mejor lo
-   re-resolvería o usaría el path con `notifier` de cambios.
-3. **Un atacante con root** puede descargar el módulo (`rmmod`). Mitigación a
-   futuro: firmar el módulo y activar lockdown, o moverse a BPF-LSM que es más
-   difícil de quitar.
-4. **A nivel de hardware/hipervisor**, un ataque de canal lateral o DMA podría
+   cambia el inodo y hay que recargar el módulo. Una versión mejor volvería a
+   buscar el inodo cuando el archivo cambie.
+3. **Un atacante con root** puede descargar el módulo (`rmmod`). Una versión de
+   producción iría compilada dentro del kernel como un LSM de verdad, que no se
+   puede descargar.
+4. **No detiene un ataque tipo Dirty COW.** Ese exploit mapeaba el archivo con
+   solo `PROT_READ` (que nuestro módulo permite) y escribía por
+   `/proc/self/mem`, un camino que no pasa por `mmap()` ni `mprotect()`. La
+   defensa contra eso es tener el kernel actualizado; nuestro módulo protege
+   contra el abuso "normal" de `mmap()`, no contra bugs del propio kernel.
+5. **A nivel de hardware/hipervisor**, un ataque de canal lateral o DMA podría
    leer la memoria física saltándose las tablas de páginas. Eso se mitiga con
    tecnologías como IOMMU o memoria cifrada (AMD SEV / Intel TDX), fuera del
    alcance de este parcial.

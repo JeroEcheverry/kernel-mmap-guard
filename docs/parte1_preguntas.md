@@ -1,8 +1,8 @@
 # Parte I — Análisis conceptual (10 preguntas, 30%)
 
 > Respuestas al nivel de un curso de Sistemas Operativos de pregrado.
-> Las estructuras y funciones citadas se verificaron contra los headers del
-> kernel Linux 6.6 / 7.0 que usamos en el proyecto.
+> Las estructuras y funciones citadas corresponden a kernels Linux 6.x
+> (el módulo se compiló contra los headers del kernel 6.8).
 
 ---
 
@@ -53,8 +53,8 @@ Implicación de seguridad: `MAP_SHARED` es el peligroso para la integridad del
 archivo, porque las escrituras son persistentes y visibles entre procesos. Por
 eso nuestro módulo bloquea siempre `MAP_SHARED + PROT_WRITE` sobre archivos
 protegidos. `MAP_PRIVATE` es menos grave (los cambios se quedan en la copia),
-pero aun así lo bloqueamos en "modo estricto" porque es la base de ataques tipo
-Dirty COW.
+pero aun así lo bloqueamos en "modo estricto" para que ningún proceso pueda
+tener en su memoria una versión alterada del archivo (ver pregunta 8).
 
 ---
 
@@ -74,15 +74,29 @@ Dirty COW.
 5. De ahí en adelante el proceso escribe en su copia privada.
 
 **¿Cómo se vuelve peligroso?** Si el kernel maneja mal las banderas de
-protección, puede confundir "esta página ya es privada y escribible" con "esta
-página es la original del archivo". Ese fue exactamente el bug de **Dirty COW
-(CVE-2016-5195)**: una condición de carrera entre la escritura COW y
-`madvise(MADV_DONTNEED)` lograba que la escritura cayera sobre la página
-original del archivo en vez de sobre la copia. Como se podían mapear archivos
-de solo lectura del sistema (por ejemplo binarios con setuid), un usuario normal
-podía modificarlos y escalar privilegios. El arreglo del kernel fue separar
-mejor el bit de "puede escribir" (`FOLL_WRITE`) del de "forzar la copia"
-(`FOLL_FORCE`) y usar `pte_dirty()` para saber si la copia ya se hizo.
+protección, puede confundir "esta página ya es mi copia privada" con "esta
+página es la original del archivo". Ese fue el bug de **Dirty COW
+(CVE-2016-5195)**:
+
+- El atacante mapeaba un archivo de solo lectura (por ejemplo `/etc/passwd` o
+  un binario setuid de root) con `MAP_PRIVATE` y **solo `PROT_READ`**.
+- Un hilo escribía en esa región a través de `/proc/self/mem`. Ese camino usa
+  la bandera `FOLL_FORCE` (la misma que usan los depuradores), que permite
+  escribir en una página de solo lectura **siempre que se haga la copia COW**.
+- Otro hilo llamaba sin parar `madvise(MADV_DONTNEED)`, que bota la copia
+  privada.
+- El kernel, después de hacer la copia, "olvidaba" que la escritura era
+  forzada. Si justo en ese momento `madvise` botaba la copia, la siguiente
+  búsqueda devolvía la **página original del Page Cache** y la escritura caía
+  ahí: el archivo de root quedaba modificado y el usuario podía escalar
+  privilegios.
+
+El arreglo (octubre de 2016) agregó una bandera interna `FOLL_COW`
+para recordar que la copia ya se hizo, y solo deja escribir en una página de
+solo lectura si además está sucia (`pte_dirty()`), es decir, si de verdad es
+la copia privada. En kernels más nuevos esa lógica se reescribió, pero la idea
+es la misma: nunca escribir en una página que no se haya comprobado que es la
+copia.
 
 ---
 
@@ -142,8 +156,8 @@ pero sí controla *quién* puede mapear el archivo, que es el primer paso.
 Cuando un proceso escribe en un mapeo `MAP_SHARED`, el cambio queda primero solo
 en memoria: la página se marca como **sucia** (dirty, bit `PG_dirty`). El kernel
 la escribe al disco más tarde, de dos maneras:
-- automáticamente, cuando el hilo `pdflush`/`writeback` decide persistir las
-  páginas sucias, o
+- automáticamente, cuando los hilos de *writeback* del kernel (aparecen como
+  `kworker` en `ps`) deciden persistir las páginas sucias, o
 - cuando el proceso llama `msync()` (para mapeos) o `fsync()` (para el archivo)
   para forzarlo.
 
@@ -203,22 +217,27 @@ ese contenido se filtra o se vuelca a otro lado, hay un problema. Por eso en
 ## 9. Mitigación de carreras (`madvise(MADV_DONTNEED)` vs. escritura)
 
 `madvise(MADV_DONTNEED)` le dice al kernel "ya no necesito estas páginas,
-bótalas". El problema de Dirty COW era una carrera: un hilo escribía (forzando
-la copia COW) mientras otro botaba la página con `MADV_DONTNEED`, y en el
-momento justo el kernel perdía el rastro de si la copia privada ya existía,
-terminando por escribir sobre la página original del archivo.
+bótalas". En un mapeo privado, botar la página significa perder la copia COW:
+el siguiente acceso vuelve a leer la página original del archivo. El problema
+de Dirty COW (pregunta 3) era una carrera: un hilo escribía con `FOLL_FORCE`
+por `/proc/self/mem` mientras otro botaba la copia, y en el momento justo el
+kernel terminaba escribiendo sobre la página original.
 
-El kernel actual lo previene de varias formas:
-- La escritura COW y el `madvise` toman el lock de la tabla de páginas (PTL),
-  así que no pueden pisarse en la zona crítica.
-- Se cambió la lógica para que la decisión de escribir use `pte_dirty()` y la
-  bandera `FOLL_FORCE` / `FAULT_FLAG_WRITE` de forma consistente, de modo que
-  botar la página no haga que el kernel crea que puede escribir en la original.
+El kernel actual lo previene así:
+- Las dos operaciones toman el lock de la tabla de páginas (PTL) y el
+  `mmap_lock` del proceso, así que no pueden pisarse en la parte crítica.
+- Antes de dejar una escritura forzada sobre una página de solo lectura, el
+  kernel comprueba que esa página es de verdad la copia privada (en 2016 con
+  `FOLL_COW` + `pte_dirty()`). Si `madvise` la botó, el kernel no escribe en la
+  original: vuelve a provocar el fallo y hace una copia nueva.
 
-Nuestro `pruebas/carrera.c` ejecuta esta misma combinación (escritura a un
-mapeo privado + `madvise(MADV_DONTNEED)` en paralelo) de forma benigna y
-verifica que el archivo en disco **no cambie**, confirmando que el kernel 6.6
-ya está parchado.
+Nuestro `pruebas/carrera.c` **no reproduce Dirty COW** (eso exigiría escribir
+por `/proc/self/mem`, y no queremos entregar un exploit). Lo que hace es una
+versión benigna: un hilo escribe normalmente en un mapeo privado mientras otro
+llama `madvise(MADV_DONTNEED)` sin parar, y al final verifica que el archivo
+en disco **no cambió**. Eso comprueba que el aislamiento COW se mantiene aun
+con concurrencia, pero no sirve como prueba de que el kernel esté parchado
+contra Dirty COW.
 
 ---
 

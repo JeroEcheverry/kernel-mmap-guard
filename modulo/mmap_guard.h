@@ -35,10 +35,8 @@ struct decision {
 /* ---- politica.c ---- */
 int politica_cargar(char *rutas[], int n);
 bool politica_archivo_protegido(struct file *archivo);
-struct decision politica_revisar_mmap(struct file *archivo,
-				      unsigned long prot, unsigned long flags);
-struct decision politica_revisar_mprotect(struct vm_area_struct *vma,
-					  unsigned long prot);
+/* La usan mmap y mprotect: prot = permisos pedidos, compartido = MAP_SHARED */
+struct decision politica_revisar(unsigned long prot, bool compartido);
 int politica_num_archivos(void);
 const char *politica_ruta(int i);
 
@@ -48,6 +46,8 @@ extern int uid_autorizado;
 extern int contar_fallos;
 
 /* ---- auditoria.c ---- */
+
+/* atomic_long_t: contador que varios CPUs pueden sumar a la vez sin lock */
 struct contadores {
 	atomic_long_t mmap_revisados;   /* mmap sobre archivos protegidos */
 	atomic_long_t mmap_denegados;
@@ -64,8 +64,5 @@ void auditoria_registrar(enum tipo_evento tipo, struct file *archivo,
 			 struct decision d);
 int auditoria_iniciar(void);
 void auditoria_terminar(void);
-
-/* main.c le pasa esto a auditoria para mostrar si se perdieron eventos */
-int kprobes_perdidos(void);
 
 #endif /* MMAP_GUARD_H */

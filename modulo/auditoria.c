@@ -1,9 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * auditoria.c
  *
  * Guarda los ultimos MAX_EVENTOS accesos a archivos protegidos en un
- * buffer circular y los muestra en /proc/mmap_guard.
+ * buffer circular (cuando se llena, el nuevo evento pisa al mas viejo)
+ * y los muestra en /proc/mmap_guard.
  * Las denegaciones tambien se imprimen en dmesg.
  */
 
@@ -37,8 +37,8 @@ static int siguiente;        /* posicion donde se escribe el proximo evento */
 static int total_eventos;    /* cuantos se han guardado (max MAX_EVENTOS) */
 
 /*
- * Spinlock y no mutex: los handlers de kprobes corren con la
- * apropiacion (preemption) desactivada, entonces no pueden dormir.
+ * Spinlock y no mutex: el codigo de un kprobe no puede dormir, y un mutex
+ * puede dormir mientras espera. El spinlock espera dando vueltas.
  */
 static DEFINE_SPINLOCK(lock_eventos);
 
@@ -51,12 +51,13 @@ void auditoria_registrar(enum tipo_evento tipo, struct file *archivo,
 	struct evento *e;
 	unsigned long flags;
 
+	/* irqsave: ademas del lock, apaga las interrupciones mientras lo tenemos */
 	spin_lock_irqsave(&lock_eventos, flags);
 
 	e = &eventos[siguiente];
 	e->tiempo_ns = ktime_get_ns();
-	e->pid = current->pid;
-	e->uid = from_kuid(&init_user_ns, current_uid());
+	e->pid = current->pid;   /* current = el proceso que hizo el mmap */
+	e->uid = current_uid().val;   /* kuid_t guarda el numero en .val */
 	get_task_comm(e->proceso, current);
 	/* %pD imprime el nombre del archivo a partir del struct file */
 	snprintf(e->archivo, LARGO_NOMBRE, "%pD", archivo);
@@ -64,14 +65,15 @@ void auditoria_registrar(enum tipo_evento tipo, struct file *archivo,
 	e->prot = prot;
 	e->compartido = compartido;
 	e->denegado = d.denegar;
-	e->motivo = d.motivo;   /* apunta a un texto constante, no hay que copiarlo */
+	e->motivo = d.motivo;   /* es un texto fijo, basta guardar el puntero */
 
-	siguiente = (siguiente + 1) % MAX_EVENTOS;
+	siguiente = (siguiente + 1) % MAX_EVENTOS;   /* al llegar al final vuelve a 0 */
 	if (total_eventos < MAX_EVENTOS)
 		total_eventos++;
 
 	spin_unlock_irqrestore(&lock_eventos, flags);
 
+	/* ratelimited: si llegan muchos seguidos, no llena el dmesg */
 	if (d.denegar)
 		pr_warn_ratelimited("mmap_guard: DENEGADO %s pid=%d (%s) archivo=%pD motivo=%s\n",
 				    tipo == EVENTO_MMAP ? "mmap" : "mprotect",
@@ -90,7 +92,7 @@ static void prot_a_texto(unsigned long prot, char *buf)
 /* Lo que se ve al hacer: cat /proc/mmap_guard */
 static int mostrar_proc(struct seq_file *m, void *v)
 {
-	struct evento copia;
+	struct evento *e;
 	unsigned long flags;
 	char permisos[4];
 	int i, inicio, n;
@@ -110,37 +112,39 @@ static int mostrar_proc(struct seq_file *m, void *v)
 	seq_printf(m, "  mprotect denegados:  %ld\n", atomic_long_read(&stats.mprotect_denegados));
 	seq_printf(m, "  page faults lectura: %ld\n", atomic_long_read(&stats.fallos_lectura));
 	seq_printf(m, "  page faults escrit.: %ld\n", atomic_long_read(&stats.fallos_escritura));
-	seq_printf(m, "  kprobes perdidos:    %d\n", kprobes_perdidos());
 
 	seq_puts(m, "\nUltimos eventos (mas antiguo primero):\n");
 	seq_puts(m, "  tiempo(s)      pid    uid  proceso          op        prot tipo   resultado  archivo / motivo\n");
 
-	/* Se copia cada evento con el lock tomado y se imprime sin el lock */
+	/* con el lock tomado para que nadie agregue eventos mientras leemos */
 	spin_lock_irqsave(&lock_eventos, flags);
 	n = total_eventos;
+	/* el evento mas antiguo esta n posiciones antes de 'siguiente' */
 	inicio = (siguiente - n + MAX_EVENTOS) % MAX_EVENTOS;
-	spin_unlock_irqrestore(&lock_eventos, flags);
 
 	for (i = 0; i < n; i++) {
-		spin_lock_irqsave(&lock_eventos, flags);
-		copia = eventos[(inicio + i) % MAX_EVENTOS];
-		spin_unlock_irqrestore(&lock_eventos, flags);
-
-		prot_a_texto(copia.prot, permisos);
+		e = &eventos[(inicio + i) % MAX_EVENTOS];
+		prot_a_texto(e->prot, permisos);
 		seq_printf(m, "  %5llu.%06llu  %-6d %-4u %-16s %-9s %s  %-6s %-9s  %s (%s)\n",
-			   copia.tiempo_ns / 1000000000ULL,
-			   (copia.tiempo_ns % 1000000000ULL) / 1000,
-			   copia.pid, copia.uid, copia.proceso,
-			   copia.tipo == EVENTO_MMAP ? "mmap" : "mprotect",
+			   e->tiempo_ns / 1000000000ULL,
+			   (e->tiempo_ns % 1000000000ULL) / 1000,
+			   e->pid, e->uid, e->proceso,
+			   e->tipo == EVENTO_MMAP ? "mmap" : "mprotect",
 			   permisos,
-			   copia.compartido ? "shared" : "priv",
-			   copia.denegado ? "DENEGADO" : "ok",
-			   copia.archivo, copia.motivo);
+			   e->compartido ? "shared" : "priv",
+			   e->denegado ? "DENEGADO" : "ok",
+			   e->archivo, e->motivo);
 	}
+	spin_unlock_irqrestore(&lock_eventos, flags);
 
 	return 0;
 }
 
+/*
+ * Para crear un archivo en /proc se le dice al kernel que funciones llamar
+ * al abrirlo y leerlo. seq_file es una ayuda del kernel: nosotros solo
+ * escribimos el texto en mostrar_proc() y el kernel se encarga del resto.
+ */
 static int abrir_proc(struct inode *inode, struct file *file)
 {
 	return single_open(file, mostrar_proc, NULL);

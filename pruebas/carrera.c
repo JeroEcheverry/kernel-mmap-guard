@@ -11,10 +11,13 @@
  * cow_privada:
  *   Un hilo escribe en un mapeo MAP_PRIVATE (las escrituras van a una
  *   copia COW, nunca al archivo) mientras otro hilo llama
- *   madvise(MADV_DONTNEED) sin parar. En un kernel actual el archivo
- *   original NUNCA debe cambiar: esta es la combinacion que el kernel
- *   endurecio despues de Dirty COW (CVE-2016-5195). Al final se verifica
- *   que el archivo quedo intacto.
+ *   madvise(MADV_DONTNEED) sin parar (madvise bota la copia privada).
+ *   Al final se verifica que el archivo en disco quedo intacto.
+ *   OJO: esto NO reproduce Dirty COW (ese ataque escribia por
+ *   /proc/self/mem); solo comprueba que la copia COW sigue aislada del
+ *   archivo aunque haya concurrencia.
+ *   Hay que correrla con modo_estricto=0, porque en modo estricto el
+ *   modulo bloquea el mmap privado con escritura y la prueba no arranca.
  *
  * concurrente:
  *   Varios hilos intentan al mismo tiempo mmap(MAP_SHARED, PROT_WRITE)
@@ -82,6 +85,7 @@ static int prueba_cow(int segundos)
 		/* si el modulo bloquea el mmap privado+escritura, la prueba
 		 * tambien se considera superada: nunca hubo escritura */
 		printf("mmap privado bloqueado por el modulo (errno=%d)\n", errno);
+		printf("  (para probar COW de verdad, correr con modo_estricto=0)\n");
 		close(fd);
 		return 0;
 	}
@@ -104,7 +108,7 @@ static int prueba_cow(int segundos)
 		printf("OK: el archivo quedo intacto (las escrituras fueron a la copia privada)\n");
 		return 0;
 	}
-	printf("FALLO: el archivo original cambio, el kernel es vulnerable\n");
+	printf("FALLO: el archivo original cambio (la copia COW no quedo aislada)\n");
 	return 1;
 }
 

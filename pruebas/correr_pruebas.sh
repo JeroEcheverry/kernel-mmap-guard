@@ -15,6 +15,8 @@
 #   - ejecucion  -> BLOQUEADO
 #   - mprotect   -> BLOQUEADO
 #   - carreras   -> archivo intacto / ningun mmap de escritura pasa
+#     (la prueba cow_privada se corre con modo_estricto=0 para que el
+#      mmap privado se permita y de verdad se pruebe la copia COW)
 
 set -u
 
@@ -79,7 +81,13 @@ else
 fi
 
 titulo "Condiciones de carrera"
+# modo_estricto se puede cambiar en caliente porque el parametro es 0644
+PARAM_ESTRICTO=/sys/module/mmap_guard/parameters/modo_estricto
+echo 0 > "$PARAM_ESTRICTO"
+echo "  (modo_estricto=0 para la prueba COW)"
 sudo -u "#1000" "$DIR_PRUEBAS/carrera" "$ARCHIVO" cow_privada 3
+echo 1 > "$PARAM_ESTRICTO"
+echo "  (modo_estricto=1 de nuevo)"
 sudo -u "#1000" "$DIR_PRUEBAS/carrera" "$ARCHIVO" concurrente
 
 titulo "Reporte de auditoria (/proc/mmap_guard)"

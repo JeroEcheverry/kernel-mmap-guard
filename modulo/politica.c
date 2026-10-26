@@ -5,9 +5,10 @@
  * Aqui se guarda la lista de archivos protegidos y se decide si una
  * operacion mmap()/mprotect() se permite o se niega.
  *
- * Los archivos se identifican por (dispositivo, numero de inodo) y no por
- * el nombre. Asi no se puede saltar la proteccion usando un enlace duro
- * o simbolico con otro nombre, porque todos apuntan al mismo inodo.
+ * Los archivos se identifican por su inodo y no por el nombre. Asi un
+ * enlace con otro nombre no sirve para saltarse la proteccion, porque
+ * apunta al mismo inodo. Tambien se guarda el dispositivo (disco), porque
+ * el numero de inodo solo es unico dentro de un mismo disco.
  */
 
 #include <linux/kernel.h>
@@ -38,6 +39,7 @@ int politica_cargar(char *rutas[], int n)
 
 	num_archivos = 0;
 	for (i = 0; i < n && i < MAX_ARCHIVOS; i++) {
+		/* kern_path busca la ruta (como hace open), siguiendo enlaces */
 		err = kern_path(rutas[i], LOOKUP_FOLLOW, &p);
 		if (err) {
 			pr_warn("mmap_guard: no se encontro %s (error %d)\n",
@@ -53,7 +55,7 @@ int politica_cargar(char *rutas[], int n)
 			rutas[i], ino->i_ino);
 		num_archivos++;
 
-		path_put(&p);   /* soltamos la referencia que tomo kern_path */
+		path_put(&p);   /* liberar lo que reservo kern_path */
 	}
 
 	return num_archivos;
@@ -76,7 +78,7 @@ bool politica_archivo_protegido(struct file *archivo)
 	int i;
 
 	if (!archivo)
-		return false;   /* mmap anonimo (sin archivo), no nos interesa */
+		return false;   /* mmap sin archivo (memoria anonima) */
 
 	ino = file_inode(archivo);
 	for (i = 0; i < num_archivos; i++) {
@@ -90,7 +92,8 @@ bool politica_archivo_protegido(struct file *archivo)
 /* El usuario autorizado puede hacer cualquier cosa (-1 = nadie) */
 static bool es_usuario_autorizado(void)
 {
-	uid_t uid = from_kuid(&init_user_ns, current_uid());
+	/* current_uid() devuelve un kuid_t: el numero del usuario esta en .val */
+	uid_t uid = current_uid().val;
 
 	return uid_autorizado >= 0 && uid == (uid_t)uid_autorizado;
 }
@@ -99,11 +102,11 @@ static bool es_usuario_autorizado(void)
  * Reglas comunes para mmap y mprotect.
  *   1. Nunca se permite PROT_EXEC  -> evita ejecutar codigo inyectado.
  *   2. MAP_SHARED + PROT_WRITE     -> los cambios llegarian al disco, se niega.
- *   3. MAP_PRIVATE + PROT_WRITE    -> solo se niega en modo estricto, porque
- *      la copia es privada (COW) pero igual es la base de ataques como
- *      Dirty COW.
+ *   3. MAP_PRIVATE + PROT_WRITE    -> solo se niega en modo estricto. La copia
+ *      es privada (COW) y no toca el disco, pero el proceso tendria en su
+ *      memoria una version alterada del archivo.
  */
-static struct decision aplicar_reglas(unsigned long prot, bool compartido)
+struct decision politica_revisar(unsigned long prot, bool compartido)
 {
 	struct decision d = { .denegar = false, .motivo = "permitido" };
 
@@ -124,25 +127,4 @@ static struct decision aplicar_reglas(unsigned long prot, bool compartido)
 	}
 
 	return d;
-}
-
-struct decision politica_revisar_mmap(struct file *archivo,
-				      unsigned long prot, unsigned long flags)
-{
-	/*
-	 * MAP_TYPE separa el tipo de mapeo. Todo lo que no sea MAP_PRIVATE
-	 * (MAP_SHARED o MAP_SHARED_VALIDATE) se considera compartido.
-	 */
-	bool compartido = (flags & MAP_TYPE) != MAP_PRIVATE;
-
-	return aplicar_reglas(prot, compartido);
-}
-
-struct decision politica_revisar_mprotect(struct vm_area_struct *vma,
-					  unsigned long prot)
-{
-	/* En la VMA ya existe, el tipo de mapeo esta en vm_flags */
-	bool compartido = (vma->vm_flags & VM_SHARED) != 0;
-
-	return aplicar_reglas(prot, compartido);
 }

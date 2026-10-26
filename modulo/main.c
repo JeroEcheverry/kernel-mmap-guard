@@ -2,22 +2,17 @@
 /*
  * main.c - mmap_guard
  *
- * Modulo de kernel que vigila los mmap() y mprotect() sobre una lista de
- * archivos protegidos. Usa kprobes, que permiten "engancharse" a una
- * funcion del kernel sin recompilarlo.
+ * Modulo que vigila los mmap() y mprotect() sobre archivos protegidos.
+ * Usa kprobes: una forma de "engancharse" a una funcion del kernel sin
+ * recompilarlo.
  *
- * Funciones interceptadas:
- *   - security_mmap_file()    : la llama el kernel en cada mmap() antes de
- *                               crear la VMA. Si devuelve error, el mmap falla.
- *   - security_file_mprotect(): la llama mprotect() antes de cambiar permisos.
- *   - handle_mm_fault()       : manejador de page faults (solo para contar).
- *
- * Para las dos primeras usamos kretprobe: en la entrada revisamos los
- * argumentos y, si hay que negar, en el retorno cambiamos el valor
- * devuelto por -EACCES. Asi el mmap()/mprotect() le falla al proceso.
+ * Funciones que vigilamos:
+ *   - security_mmap_file()     se llama en cada mmap()
+ *   - security_file_mprotect() se llama en cada mprotect()
+ *   - handle_mm_fault()        se llama en cada page fault (solo contamos)
  *
  * Uso:
- *   sudo insmod mmap_guard.ko archivos=/ruta/uno,/ruta/dos modo_estricto=1
+ *   sudo insmod mmap_guard.ko archivos=/tmp/secreto.txt modo_estricto=1
  *   cat /proc/mmap_guard
  */
 
@@ -28,12 +23,12 @@
 #include <linux/ptrace.h>
 #include "mmap_guard.h"
 
-MODULE_LICENSE("GPL");   /* necesario: register_kprobe es EXPORT_SYMBOL_GPL */
+MODULE_LICENSE("GPL");   /* los kprobes solo se pueden usar con licencia GPL */
 MODULE_AUTHOR("Equipo Sistemas Operativos EAFIT 2026-2");
 MODULE_DESCRIPTION("Control de acceso y auditoria de mmap() sobre archivos protegidos");
 MODULE_VERSION("1.0");
 
-/* ---------- Parametros del modulo ---------- */
+/* ---------- Parametros del modulo (se pasan en el insmod) ---------- */
 
 static char *archivos[MAX_ARCHIVOS];
 static int num_archivos_param;
@@ -52,43 +47,43 @@ int contar_fallos = 1;
 module_param(contar_fallos, int, 0444);
 MODULE_PARM_DESC(contar_fallos, "1 = contar page faults sobre archivos protegidos");
 
-/* ---------- Hook 1: security_mmap_file ---------- */
-
 /*
- * int security_mmap_file(struct file *file, unsigned long prot,
- *                        unsigned long flags);
+ * Un kretprobe tiene dos funciones:
+ *   - entrada: se ejecuta al llamar la funcion vigilada (vemos los argumentos)
+ *   - retorno: se ejecuta cuando la funcion termina (podemos cambiar lo que devuelve)
  *
- * regs_get_kernel_argument(regs, n) devuelve el argumento n de la funcion
- * (en x86_64 son los registros rdi, rsi, rdx...).
+ * regs_get_kernel_argument(regs, n) lee el argumento numero n.
  */
+
+/* ---------- Hook 1: mmap ---------- */
+
+/* Firma: int security_mmap_file(struct file *file, unsigned long prot, unsigned long flags) */
 static int entrada_mmap(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct file *archivo = (struct file *)regs_get_kernel_argument(regs, 0);
 	unsigned long prot = regs_get_kernel_argument(regs, 1);
 	unsigned long flags = regs_get_kernel_argument(regs, 2);
-	bool compartido = (flags & MAP_TYPE) != MAP_PRIVATE;
+	bool compartido = (flags & MAP_SHARED) != 0;
 	struct decision d;
 
 	if (!politica_archivo_protegido(archivo))
-		return 1;   /* devolver 1 = no ejecutar el handler de retorno */
+		return 1;   /* 1 = no hacer nada al retornar */
 
 	atomic_long_inc(&stats.mmap_revisados);
-	d = politica_revisar_mmap(archivo, prot, flags);
+	d = politica_revisar(prot, compartido);
 	auditoria_registrar(EVENTO_MMAP, archivo, prot, compartido, d);
 
 	if (!d.denegar)
 		return 1;
 
 	atomic_long_inc(&stats.mmap_denegados);
-	return 0;           /* 0 = si ejecutar retorno_negar() */
+	return 0;   /* 0 = ejecutar retorno_negar() */
 }
 
-/*
- * Solo llega aqui cuando hay que negar. Si otro LSM (AppArmor, SELinux)
- * ya devolvio un error lo dejamos igual; si devolvio 0 lo cambiamos.
- */
+/* Cambia el valor que devuelve la funcion por -EACCES (permiso denegado) */
 static int retorno_negar(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
+	/* si otro modulo de seguridad ya dio error, lo dejamos igual */
 	if (regs_return_value(regs) == 0)
 		regs_set_return_value(regs, (unsigned long)-EACCES);
 	return 0;
@@ -98,33 +93,33 @@ static struct kretprobe krp_mmap = {
 	.kp.symbol_name = "security_mmap_file",
 	.entry_handler  = entrada_mmap,
 	.handler        = retorno_negar,
-	.maxactive      = 64,   /* llamadas simultaneas que puede seguir */
 };
 
-/* ---------- Hook 2: security_file_mprotect ---------- */
+/* ---------- Hook 2: mprotect ---------- */
 
 /*
- * int security_file_mprotect(struct vm_area_struct *vma,
- *                            unsigned long reqprot, unsigned long prot);
+ * Firma: int security_file_mprotect(struct vm_area_struct *vma,
+ *                                   unsigned long reqprot, unsigned long prot)
  *
- * Sin este hook alguien podria hacer mmap(PROT_READ), que se permite, y
- * despues mprotect(PROT_READ | PROT_WRITE) para saltarse la regla.
+ * Sin este hook se podria hacer mmap(PROT_READ), que se permite, y
+ * despues mprotect(PROT_WRITE) para saltarse la regla.
  */
 static int entrada_mprotect(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct vm_area_struct *vma = (struct vm_area_struct *)regs_get_kernel_argument(regs, 0);
-	unsigned long reqprot = regs_get_kernel_argument(regs, 1);
+	unsigned long reqprot = regs_get_kernel_argument(regs, 1);   /* permisos pedidos */
+	bool compartido;
 	struct decision d;
 
 	if (!politica_archivo_protegido(vma->vm_file))
 		return 1;
 
+	/* el mapeo ya existe: si es compartido quedo guardado en vm_flags */
+	compartido = (vma->vm_flags & VM_SHARED) != 0;
+
 	atomic_long_inc(&stats.mprotect_revisados);
-	/* usamos reqprot (lo que pidio el usuario), no prot, que el kernel
-	 * puede haber ajustado con READ_IMPLIES_EXEC */
-	d = politica_revisar_mprotect(vma, reqprot);
-	auditoria_registrar(EVENTO_MPROTECT, vma->vm_file, reqprot,
-			    (vma->vm_flags & VM_SHARED) != 0, d);
+	d = politica_revisar(reqprot, compartido);
+	auditoria_registrar(EVENTO_MPROTECT, vma->vm_file, reqprot, compartido, d);
 
 	if (!d.denegar)
 		return 1;
@@ -137,17 +132,17 @@ static struct kretprobe krp_mprotect = {
 	.kp.symbol_name = "security_file_mprotect",
 	.entry_handler  = entrada_mprotect,
 	.handler        = retorno_negar,
-	.maxactive      = 64,
 };
 
-/* ---------- Hook 3: handle_mm_fault (solo cuenta) ---------- */
+/* ---------- Hook 3: page faults (solo cuenta) ---------- */
 
 /*
- * vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
- *                            unsigned int flags, struct pt_regs *regs);
+ * Firma: vm_fault_t handle_mm_fault(struct vm_area_struct *vma,
+ *                                   unsigned long address,
+ *                                   unsigned int flags, struct pt_regs *regs)
  *
- * Se llama en TODOS los page faults del sistema, asi que aqui no se hace
- * nada pesado: solo comparar el inodo y sumar un contador.
+ * Se llama en TODOS los page faults del sistema, por eso aqui solo
+ * comparamos el inodo y sumamos un contador.
  */
 static int antes_fallo(struct kprobe *p, struct pt_regs *regs)
 {
@@ -169,11 +164,6 @@ static struct kprobe kp_fallos = {
 };
 
 static bool fallos_registrado;
-
-int kprobes_perdidos(void)
-{
-	return krp_mmap.nmissed + krp_mprotect.nmissed;
-}
 
 /* ---------- Carga y descarga ---------- */
 
@@ -209,8 +199,8 @@ static int __init mmap_guard_init(void)
 
 	if (contar_fallos) {
 		err = register_kprobe(&kp_fallos);
-		if (err)   /* no es grave, el modulo sigue sin contar fallos */
-			pr_warn("mmap_guard: no se pudo engancharse a handle_mm_fault (%d)\n", err);
+		if (err)   /* no es grave: el modulo funciona sin contar fallos */
+			pr_warn("mmap_guard: no se pudo vigilar handle_mm_fault (%d)\n", err);
 		else
 			fallos_registrado = true;
 	}
@@ -219,6 +209,7 @@ static int __init mmap_guard_init(void)
 		modo_estricto, uid_autorizado);
 	return 0;
 
+	/* si algo falla, se deshace lo que ya se habia registrado */
 error_mmap:
 	unregister_kretprobe(&krp_mmap);
 error_proc:
@@ -228,7 +219,7 @@ error_proc:
 
 static void __exit mmap_guard_exit(void)
 {
-	/* Primero se quitan los hooks para que nadie use la auditoria */
+	/* primero se quitan los hooks, despues /proc */
 	if (fallos_registrado)
 		unregister_kprobe(&kp_fallos);
 	unregister_kretprobe(&krp_mprotect);

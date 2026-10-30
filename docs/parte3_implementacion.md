@@ -14,7 +14,9 @@ Todo el código está en el repositorio:
 - **`pruebas/`** — programas que simulan los ataques:
   - `prueba_mmap.c`: prueba cada tipo de mapeo.
   - `carrera.c`: pruebas de condiciones de carrera (benignas).
-  - `correr_pruebas.sh`: compila, carga el módulo, corre todo y lo descarga.
+  - `prueba_python.py`: los mismos casos en Python (el bloqueo no depende del programa).
+  - `correr_pruebas.sh`: carga el módulo, corre todo y lo descarga.
+- **`Makefile`** (raíz) — `make` compila todo, `sudo make test` corre las pruebas y `sudo make bench` mide el overhead.
   - `benchmark.c` y `medir_overhead.sh`: miden el costo extra del módulo.
 
 ### Cómo funciona la intercepción (resumen)
@@ -55,7 +57,7 @@ que vivir ahí.
 
 ### Resultados de las pruebas
 
-> Esta sección se llena corriendo `sudo ./pruebas/correr_pruebas.sh`.
+> Esta sección se llena corriendo `make` y luego `sudo make test`.
 > A continuación la salida obtenida en nuestra máquina (kernel
 > 6.6 WSL2 / Ubuntu). Los resultados confirman que:
 
@@ -77,18 +79,18 @@ Tabla resumen de lo que esperábamos:
 ### Medición de impacto (overhead)
 
 Para medirlo usamos `pruebas/benchmark.c` y el script
-`pruebas/medir_overhead.sh` (`sudo ./medir_overhead.sh`). El benchmark mide
-el tiempo promedio de un `mmap()`+`munmap()` y de tocar una página (lo que
-provoca page faults) en tres casos:
+`pruebas/medir_overhead.sh` (`sudo make bench`). El benchmark mide
+el tiempo promedio de un `mmap()`+`munmap()` y de un page fault en tres casos:
 sin módulo (A), con módulo sobre un archivo no protegido (B) y con módulo
-sobre el archivo protegido (C). Si `perf` está instalado, el script también
-corre `perf stat -e page-faults`.
+sobre el archivo protegido (C). Los page faults se cuentan con `getrusage()`
+(como en el paso 5 del repositorio del profesor) y, si `strace` está
+instalado, el script también corre `strace -c`.
 
-| Caso | mmap+munmap (ns) | por página tocada (ns) |
-|------|------------------|-----------------|
-| A. sin módulo | <!-- llenar --> | <!-- llenar --> |
-| B. con módulo, archivo no protegido | <!-- llenar --> | <!-- llenar --> |
-| C. con módulo, archivo protegido | <!-- llenar --> | <!-- llenar --> |
+| Caso | mmap+munmap (ns) | page fault (ns) | page faults contados |
+|------|------------------|-----------------|----------------------|
+| A. sin módulo | <!-- llenar --> | <!-- llenar --> | <!-- llenar --> |
+| B. con módulo, archivo no protegido | <!-- llenar --> | <!-- llenar --> | <!-- llenar --> |
+| C. con módulo, archivo protegido | <!-- llenar --> | <!-- llenar --> | <!-- llenar --> |
 
 Overhead = (C − A) / A. <!-- llenar con el resultado y comentarlo -->
 
@@ -138,7 +140,6 @@ Lo que esta solución **no** cubre todavía:
 ### Cómo reproducir
 
 ```bash
-cd pruebas
-sudo ./correr_pruebas.sh      # compila, carga, prueba y descarga
-dmesg | tail -30              # mensajes del kernel (incluye las denegaciones)
+make && sudo make test      # compila, carga, prueba y descarga
+sudo dmesg | tail -30       # mensajes del kernel (incluye las denegaciones)
 ```

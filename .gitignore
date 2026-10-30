@@ -13,3 +13,6 @@ Module.symvers
 # Binarios de las pruebas
 pruebas/prueba_mmap
 pruebas/carrera
+pruebas/benchmark
+__pycache__/
+

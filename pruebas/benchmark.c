@@ -10,13 +10,15 @@
  *      Asi se ve lo que agrega el kprobe de handle_mm_fault.
  *
  * Uso: ./benchmark <archivo> <repeticiones>
- * Imprime dos lineas faciles de leer desde un script:
- *   mmap_ns <nanosegundos promedio por mmap+munmap>
- *   fallo_ns <nanosegundos promedio por pagina tocada>
+ * Imprime tres lineas faciles de leer desde un script:
+ *   mmap_ns  <nanosegundos promedio por mmap+munmap>
+ *   fallo_ns <nanosegundos promedio por page fault>
+ *   fallos   <cuantos page faults hubo en la prueba 2>
  *
- * Ojo: al tocar una pagina el kernel a veces trae tambien las vecinas en el
- * mismo page fault ("fault-around"), asi que no toda pagina tocada es un
- * fallo. Para el numero exacto de fallos usar: perf stat -e page-faults
+ * Los page faults se cuentan con getrusage() (campo ru_minflt), igual que
+ * en el paso 5 del repositorio del profesor. Se cuentan porque al tocar una
+ * pagina el kernel a veces trae tambien las vecinas en el mismo fallo
+ * ("fault-around"): no toda pagina tocada es un page fault.
  */
 
 #include <stdio.h>
@@ -26,6 +28,7 @@
 #include <time.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 
 /* tiempo actual en nanosegundos */
 static long long ahora_ns(void)
@@ -39,8 +42,9 @@ static long long ahora_ns(void)
 int main(int argc, char *argv[])
 {
 	long pagina = sysconf(_SC_PAGESIZE);
-	long long inicio, total_fallos = 0;
-	long i, n, paginas;
+	long long inicio, total_ns = 0;
+	long i, n, paginas, fallos;
+	struct rusage antes, despues;
 	volatile char leido;
 	struct stat st;
 	char *p;
@@ -82,6 +86,7 @@ int main(int argc, char *argv[])
 		perror("mmap");
 		return 1;
 	}
+	getrusage(RUSAGE_SELF, &antes);
 	for (i = 0; i < 5; i++) {   /* 5 rondas sobre todo el archivo */
 		/* MADV_DONTNEED bota las paginas del proceso: el proximo
 		 * acceso vuelve a causar un page fault */
@@ -90,10 +95,17 @@ int main(int argc, char *argv[])
 		inicio = ahora_ns();
 		for (long j = 0; j < paginas; j++)
 			leido = p[j * pagina];   /* tocar la pagina */
-		total_fallos += ahora_ns() - inicio;
+		total_ns += ahora_ns() - inicio;
 	}
+	getrusage(RUSAGE_SELF, &despues);
 	(void)leido;
-	printf("fallo_ns %lld\n", total_fallos / (5 * paginas));
+
+	/* ru_minflt = page faults "menores": la pagina ya estaba en RAM */
+	fallos = despues.ru_minflt - antes.ru_minflt;
+	if (fallos == 0)
+		fallos = 1;   /* para no dividir por cero */
+	printf("fallo_ns %lld\n", total_ns / fallos);
+	printf("fallos %ld\n", fallos);
 
 	munmap(p, st.st_size);
 	close(fd);

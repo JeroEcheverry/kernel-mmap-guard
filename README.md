@@ -21,6 +21,7 @@ donde ponemos el control.
 ```
 kernel-mmap-guard/
 ├── README.md              <- este archivo
+├── Makefile               <- compila todo (make) y corre las pruebas (sudo make test)
 ├── modulo/                <- el modulo de kernel (lenguaje C)
 │   ├── mmap_guard.h       <- declaraciones compartidas
 │   ├── main.c             <- carga del modulo y registro de los kprobes
@@ -30,6 +31,7 @@ kernel-mmap-guard/
 ├── pruebas/               <- programas que simulan ataques
 │   ├── prueba_mmap.c      <- distintos tipos de mmap (lectura, escritura, exec...)
 │   ├── carrera.c          <- pruebas de condiciones de carrera
+│   ├── prueba_python.py   <- las mismas pruebas pero en Python
 │   ├── correr_pruebas.sh  <- carga el modulo y corre todo
 │   ├── benchmark.c        <- mide el tiempo de mmap y page faults
 │   └── medir_overhead.sh  <- compara con y sin modulo
@@ -45,12 +47,11 @@ kernel-mmap-guard/
 > Necesita los headers del kernel: `sudo apt install linux-headers-$(uname -r)`
 
 ```bash
-# 1. compilar el modulo
-cd modulo
+# 1. compilar el modulo y las pruebas (sin sudo)
 make
 
 # 2. cargarlo protegiendo un archivo
-sudo insmod mmap_guard.ko archivos=/tmp/secreto.txt modo_estricto=1
+sudo insmod modulo/mmap_guard.ko archivos=/tmp/secreto.txt modo_estricto=1
 
 # 3. ver el reporte de auditoria
 cat /proc/mmap_guard
@@ -59,12 +60,15 @@ cat /proc/mmap_guard
 sudo rmmod mmap_guard
 ```
 
-O correr todo de una vez (compila, carga, prueba y descarga):
+O correr todas las pruebas de una vez (carga, prueba y descarga):
 
 ```bash
-cd pruebas
-sudo ./correr_pruebas.sh
+make
+sudo make test      # pruebas de seguridad
+sudo make bench     # medicion del overhead
 ```
+
+Para probar cada caso a mano, ver `docs/guia_pruebas_manual.md`.
 
 ## Parámetros del módulo
 

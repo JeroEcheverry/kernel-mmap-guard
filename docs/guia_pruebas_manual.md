@@ -30,16 +30,43 @@ Los kprobes tienen que estar activos en el kernel:
 grep KPROBES /boot/config-$(uname -r)   # debe salir CONFIG_KPROBES=y
 ```
 
+### Probar el entorno con el repositorio del profesor
+
+Si los módulos del profesor cargan, el nuestro también va a cargar (usan el
+mismo `KDIR`). Es una buena forma de descartar problemas del entorno:
+
+```bash
+cd ~/proyectos
+git clone https://github.com/evalenciEAFIT/SO2026B.git
+cd SO2026B/USOS/CapaKernel
+
+make all                          # sin sudo: compila todo
+make run-paso1                    # read(): 8192 syscalls
+make run-paso2                    # mmap(): 0 syscalls de read
+sudo ./scripts/load_modules.sh    # carga sus 3 modulos y crea /dev/demo_*
+./paso3_driver_copy_user/test_copy_user
+./paso4_driver_mmap_kernel/test_mmap
+./paso6_demand_paging_fault/test_demand_paging
+sudo dmesg | tail -25             # mensajes de sus modulos
+sudo ./scripts/unload_modules.sh
+```
+
+Si `load_modules.sh` y las tres pruebas terminan sin error, el entorno está
+listo. Si `make all` falla en los pasos 3, 4 o 6, faltan los headers.
+
 ---
 
 ## 1. Compilar
 
 ```bash
 cd ~/proyectos/kernel-mmap-guard
-make -C modulo                       # genera modulo/mmap_guard.ko
-gcc -O2 -Wall -o pruebas/prueba_mmap pruebas/prueba_mmap.c
-gcc -O2 -Wall -pthread -o pruebas/carrera pruebas/carrera.c
+make        # sin sudo: compila el modulo y los programas de prueba
 ```
+
+Esto genera `modulo/mmap_guard.ko` y los programas `pruebas/prueba_mmap`,
+`pruebas/carrera` y `pruebas/benchmark`. Compilar **sin sudo**: si se
+compila como root, los archivos quedan a nombre de root y después
+`make clean` falla.
 
 Si `make` no muestra ningún warning, vamos bien (el Makefile usa `-Werror`,
 así que cualquier warning detiene la compilación).
@@ -49,6 +76,7 @@ así que cualquier warning detiene la compilación).
 ## 2. Crear el archivo a proteger
 
 ```bash
+sudo rm -f /tmp/secreto.txt    # por si quedo uno de otra prueba
 echo "contenido original secreto, no tocar" > /tmp/secreto.txt
 chmod 666 /tmp/secreto.txt     # que cualquiera lo pueda abrir para escribir
 ```
@@ -200,8 +228,8 @@ En `dmesg` sale `descargado. mmap denegados=N mprotect denegados=M`.
 | Problema | Causa probable |
 |----------|----------------|
 | `make: *** /lib/modules/.../build: No such file` | faltan los headers (paso 0) |
-| `insmod: ERROR: ... Invalid parameters` | falta el parámetro `archivos=` |
-| `insmod: ERROR: ... No such file or directory` | la ruta de `archivos=` no existe (ver `dmesg`) |
+| `insmod: ERROR: ... Invalid parameters` | falta el parámetro `archivos=` o la ruta no existe (`dmesg` dice cuál) |
+| `bash: /tmp/secreto.txt: Permission denied` al crear el archivo | quedó uno de otro usuario en `/tmp`: borrarlo con `sudo rm /tmp/secreto.txt` |
 | `insmod: ... Key was rejected by service` | Secure Boot activo: el kernel solo acepta módulos firmados. Desactivarlo en la VM |
 | `fallo kretprobe security_mmap_file` en `dmesg` | el kernel no tiene kprobes o no deja engancharse a esa función |
 | todo sale PERMITIDO | el módulo no está cargado o se corrió con `uid_autorizado` igual a nuestro uid |

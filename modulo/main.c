@@ -178,7 +178,7 @@ static int __init mmap_guard_init(void)
 
 	if (politica_cargar(archivos, num_archivos_param) == 0) {
 		pr_err("mmap_guard: ningun archivo valido para proteger\n");
-		return -ENOENT;
+		return -EINVAL;   /* insmod muestra "Invalid parameters" */
 	}
 
 	err = auditoria_iniciar();
@@ -233,3 +233,4 @@ static void __exit mmap_guard_exit(void)
 
 module_init(mmap_guard_init);
 module_exit(mmap_guard_exit);
+

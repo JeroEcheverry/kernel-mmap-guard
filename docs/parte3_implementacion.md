@@ -114,21 +114,56 @@ Promedio de 3 corridas (100.000 mmap por corrida; archivo de 4 MB):
 | C. con módulo, archivo protegido | 2358 (+9.6%) | 2416 (+6.2%) | 320 |
 
 Overhead = (C − A) / A: **+9.6% en mmap()** (unos 200 ns) y **+6.2% en page faults**.
-Para archivos no protegidos (B) el impacto es menor al 1%, dentro del ruido
-entre corridas.
+Para archivos no protegidos (B) el promedio da +0.9%, pero con la mediana de
+las 3 corridas es +5.3% (~110 ns). La medición con ftrace (abajo) confirma que
+ese costo existe: es el de entrar al kprobe, que se paga en todos los mmap().
 
-Lo que esperamos ver, según lo que hace el código. El trabajo extra por cada
-`mmap()` sobre un archivo protegido es:
+Se midieron 320 page faults y no 5120 (1024 páginas × 5 rondas) porque el
+kernel hace *fault-around*: en cada fallo trae 16 páginas vecinas.
+Las mediciones se hicieron en WSL2, que es una máquina virtual, así que los
+tiempos absolutos incluyen el costo de la virtualización; la comparación
+A/B/C sigue siendo válida porque las tres corrieron en las mismas condiciones.
+
+`strace -c` no sirve para medir el overhead, porque el propio strace frena
+cada syscall (con strace cada `mmap()` tarda ~14 µs en vez de ~2 µs). Sí sirve
+para contar las llamadas: 1009 `mmap` = 1000 del benchmark + 1 de la prueba
+de page faults + 8 de la carga de la libc.
+
+### Medición con ftrace (tiempo dentro del kernel)
+
+Para aislar el costo del módulo se usó ftrace (`sudo make ftrace`, script
+`pruebas/medir_ftrace.sh`) con el tracer `function_graph`, limitado con
+`set_ftrace_filter` a las dos funciones donde actúa el módulo. Se reporta la
+mediana porque es menos sensible a interrupciones:
+
+| Función | A. sin módulo | B. no protegido | C. protegido |
+|---|---|---|---|
+| `vm_mmap_pgoff` (mmap) | 848 ns | 948 ns (+11.8%) | 964 ns (+13.7%) |
+| `handle_mm_fault` (page fault) | 1243 ns | 1295 ns (+4.2%) | 1310 ns (+5.4%) |
+
+B y C cuestan casi lo mismo: el costo principal (~100 ns por mmap) es el del
+mecanismo de kprobe, que se paga en todos los `mmap()` del sistema. Revisar
+las reglas y auditar (solo en C) agrega unos 16 ns. Un LSM compilado dentro
+del kernel evitaría ese costo, porque sus hooks son llamadas directas.
+
+Nota de WSL2: la distro corre en su propio PID namespace, así que los pid que
+se ven desde la terminal no son los que anota el kernel en el trace. Por eso el
+script filtra por nombre de proceso y no usa `set_ftrace_pid`.
+
+### De dónde sale el costo
+
+El trabajo extra por cada `mmap()` sobre un archivo protegido es:
 
 - comparar el inodo contra la lista (unas pocas comparaciones enteras),
 - revisar las banderas,
 - escribir una entrada en el buffer de auditoría (bajo spinlock).
 
 Para `mmap()` sobre archivos **no** protegidos, el módulo solo compara el inodo
-y sale de inmediato (`return 1`), así que el impacto es mínimo. El kprobe sobre
-`handle_mm_fault` es el más sensible porque se dispara en cada page fault del
-sistema; por eso ahí no hacemos nada más que comparar el inodo y sumar un
-contador atómico.
+y sale de inmediato (`return 1`). Pero como muestra ftrace, el solo hecho de
+entrar al kretprobe ya cuesta unos 100 ns, y eso lo pagan todos los `mmap()`
+del sistema. El kprobe sobre `handle_mm_fault` se dispara en cada page fault
+del sistema; por eso ahí no hacemos nada más que comparar el inodo y sumar un
+contador atómico (+50 a 70 ns según ftrace).
 
 Para ver una sola llamada a mano también sirve `strace -T`, que muestra entre
 `< >` cuánto tardó cada `mmap()`:

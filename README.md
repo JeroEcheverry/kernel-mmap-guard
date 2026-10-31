@@ -1,92 +1,104 @@
-# mmap_guard — Seguridad de archivos mapeados con mmap() en la capa del kernel
+# mmap_guard — Protección de archivos mapeados con mmap() desde el kernel
 
-Proyecto para el parcial práctico-teórico de Sistemas Operativos (EAFIT, 2026-2).
+Parcial de Sistemas Operativos (EAFIT, 2026-2).
 
-**Idea en una frase:** un módulo de kernel que vigila los `mmap()` y `mprotect()`
-sobre una lista de archivos sensibles, bloquea los accesos peligrosos
-(escritura compartida, ejecución) y deja un registro de auditoría en
-`/proc/mmap_guard`.
+**En una frase:** un módulo de kernel que vigila los `mmap()` y `mprotect()`
+sobre archivos protegidos, bloquea los accesos peligrosos (escribir el archivo
+o ejecutarlo) y anota todo en `/proc/mmap_guard`.
 
-## ¿Por qué en el kernel y no en espacio de usuario?
+## ¿Por qué en el kernel?
 
-Cuando un proceso mapea un archivo con `mmap()`, después lee y escribe en él
-usando punteros normales, **sin volver a llamar al kernel**. Por eso una
-defensa en espacio de usuario (por ejemplo una librería envuelta con
-`LD_PRELOAD`) no sirve: el atacante simplemente no la usa. El único lugar
-donde sí pasan todas las llamadas `mmap()` es dentro del kernel, y ahí es
-donde ponemos el control.
+Después de un `mmap()`, el proceso lee y escribe el archivo con punteros, sin
+volver a pedirle permiso al kernel. Una defensa en espacio de usuario se salta
+fácil (basta con no usarla). Pero **todos** los `mmap()` pasan por el kernel,
+así que ahí ponemos el control.
 
-## Estructura del proyecto
+## Estructura
 
 ```
 kernel-mmap-guard/
-├── README.md              <- este archivo
-├── Makefile               <- compila todo (make) y corre las pruebas (sudo make test)
-├── modulo/                <- el modulo de kernel (lenguaje C)
-│   ├── mmap_guard.h       <- declaraciones compartidas
-│   ├── main.c             <- carga del modulo y registro de los kprobes
-│   ├── politica.c         <- lista de archivos y reglas de permitir/denegar
+├── makefile               <- make, sudo make test, sudo make bench, sudo make ftrace
+├── modulo/                <- el modulo de kernel (C)
+│   ├── main.c             <- carga del modulo y kprobes
+│   ├── politica.c         <- archivos protegidos y reglas
 │   ├── auditoria.c        <- registro de eventos y /proc/mmap_guard
+│   ├── mmap_guard.h
 │   └── Makefile
-├── pruebas/               <- programas que simulan ataques
-│   ├── prueba_mmap.c      <- distintos tipos de mmap (lectura, escritura, exec...)
-│   ├── carrera.c          <- pruebas de condiciones de carrera
-│   ├── prueba_python.py   <- las mismas pruebas pero en Python
-│   ├── correr_pruebas.sh  <- carga el modulo y corre todo
-│   ├── benchmark.c        <- mide el tiempo de mmap y page faults
-│   └── medir_overhead.sh  <- compara con y sin modulo
-└── docs/                  <- las 3 partes del parcial
+├── pruebas/
+│   ├── prueba_mmap.c      <- 5 ataques de prueba
+│   ├── prueba_python.py   <- los mismos ataques en Python
+│   ├── carrera.c          <- pruebas de concurrencia
+│   ├── correr_pruebas.sh  <- corre todas las pruebas
+│   ├── benchmark.c        <- mide mmap y page faults
+│   ├── medir_overhead.sh  <- costo con y sin modulo (+ strace)
+│   └── medir_ftrace.sh    <- costo dentro del kernel (ftrace)
+└── docs/
     ├── parte1_preguntas.md
     ├── parte2_ia.md
     ├── parte3_implementacion.md
-    └── guia_pruebas_manual.md   <- como probar todo a mano
+    └── guia_pruebas_manual.md
 ```
 
-## Cómo se usa
-
-> Necesita los headers del kernel: `sudo apt install linux-headers-$(uname -r)`
+## Uso
 
 ```bash
-# 1. compilar el modulo y las pruebas (sin sudo)
-make
+make                # compilar (sin sudo)
+sudo make test      # pruebas de seguridad
+sudo make bench     # costo del modulo
+sudo make ftrace    # costo medido con ftrace
+```
 
-# 2. cargarlo protegiendo un archivo
+A mano:
+
+```bash
 sudo insmod modulo/mmap_guard.ko archivos=/tmp/secreto.txt modo_estricto=1
-
-# 3. ver el reporte de auditoria
 cat /proc/mmap_guard
-
-# 4. descargarlo
 sudo rmmod mmap_guard
 ```
 
-O correr todas las pruebas de una vez (carga, prueba y descarga):
+Paso a paso: `docs/guia_pruebas_manual.md`.
+
+## Parámetros
+
+| Parámetro | Por defecto | Qué hace |
+|-----------|-------------|----------|
+| `archivos` | (ninguno) | Rutas a proteger, separadas por coma |
+| `modo_estricto` | `0` | `1` = también bloquea escritura privada |
+| `uid_autorizado` | `-1` | Usuario que puede escribir (`-1` = nadie) |
+| `contar_fallos` | `1` | Cuenta los page faults del archivo |
+
+## Qué bloquea
+
+| Operación sobre un archivo protegido | Resultado |
+|--------------------------------------|-----------|
+| `mmap` solo lectura | Permitido |
+| `mmap` escritura compartida | **Bloqueado** |
+| `mmap` ejecución | **Bloqueado** |
+| `mmap` escritura privada | Bloqueado en modo estricto |
+| `mprotect` para agregar escritura o ejecución | **Bloqueado** |
+
+## Compilar en WSL2
+
+Probado en `6.6.87.2-microsoft-standard-WSL2`. WSL2 no trae los headers de su
+kernel, así que hay que armarlos una vez:
 
 ```bash
-make
-sudo make test      # pruebas de seguridad
-sudo make bench     # medicion del overhead
+sudo apt install -y build-essential flex bison bc libelf-dev libssl-dev dwarves cpio
+
+cd ~
+git clone --depth 1 --branch linux-msft-wsl-6.6.87.2 \
+    https://github.com/microsoft/WSL2-Linux-Kernel.git wsl-kernel
+cd wsl-kernel
+zcat /proc/config.gz > .config
+make olddefconfig
+make LOCALVERSION= kernelrelease     # debe ser igual a uname -r
+
+# solo si tienes GCC 15 o mas nuevo
+sed -i '/^REALMODE_CFLAGS += -fno-stack-protector/a REALMODE_CFLAGS += -std=gnu11' arch/x86/Makefile
+
+make -j$(nproc) LOCALVERSION= vmlinux
+cp vmlinux.symvers Module.symvers
+
+sudo mkdir -p /lib/modules/$(uname -r)
+sudo ln -sfn ~/wsl-kernel /lib/modules/$(uname -r)/build
 ```
-
-Para probar cada caso a mano, ver `docs/guia_pruebas_manual.md`.
-
-## Parámetros del módulo
-
-| Parámetro         | Por defecto | Qué hace                                              |
-|-------------------|-------------|-------------------------------------------------------|
-| `archivos`        | (ninguno)   | Lista de rutas a proteger, separadas por coma.        |
-| `modo_estricto`   | `0`         | Si es `1`, también bloquea `MAP_PRIVATE + PROT_WRITE`.|
-| `uid_autorizado`  | `-1`        | UID que puede mapear con escritura (`-1` = nadie).    |
-| `contar_fallos`   | `1`         | Si es `1`, cuenta los page faults de los archivos.    |
-
-## Qué bloquea y qué permite
-
-| Operación sobre un archivo protegido        | Resultado          |
-|---------------------------------------------|--------------------|
-| `mmap` solo lectura (`PROT_READ`)           | Permitido          |
-| `mmap` escritura compartida (`MAP_SHARED`)  | **Bloqueado**      |
-| `mmap` ejecución (`PROT_EXEC`)              | **Bloqueado**      |
-| `mmap` escritura privada (`MAP_PRIVATE`)    | Bloqueado solo en modo estricto |
-| `mprotect` que agrega escritura o ejecución | **Bloqueado**      |
-
-Todo (permitido o bloqueado) queda registrado en `/proc/mmap_guard`.

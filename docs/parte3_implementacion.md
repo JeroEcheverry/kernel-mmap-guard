@@ -61,7 +61,26 @@ que vivir ahí.
 > A continuación la salida obtenida en nuestra máquina (kernel
 > 6.6 WSL2 / Ubuntu). Los resultados confirman que:
 
-<!-- RESULTADOS -->
+Salida resumida de `sudo make test` (kernel 6.6.87.2-microsoft-standard-WSL2, modo_estricto=1, pruebas como usuario normal uid 1000):
+
+```
+[lectura]    PERMITIDO
+[escritura]  BLOQUEADO  errno=13 (Permission denied)
+[privada]    BLOQUEADO  errno=13 (Permission denied)
+[ejecucion]  BLOQUEADO  errno=13 (Permission denied)
+[mprotect]   mmap de solo lectura funciono -> mprotect(PROT_WRITE) BLOQUEADO errno=13
+[enlace duro /tmp/otro_nombre] escritura BLOQUEADO
+[python] mismos 5 casos -> mismo resultado
+[integridad] el archivo no fue modificado
+[carrera cow_privada] archivo intacto (~1.4 millones de page faults de escritura en 3 s)
+[carrera concurrente] 0 de 8 mmap de escritura pasaron
+
+pruebas OK: 10   pruebas MAL: 0
+```
+
+Sin el módulo, los mismos programas sí logran modificar el archivo
+(queda `HACKEADO...`), lo que confirma que el bloqueo lo hace el módulo.
+
 
 Tabla resumen de lo que esperábamos:
 
@@ -86,13 +105,17 @@ sobre el archivo protegido (C). Los page faults se cuentan con `getrusage()`
 (como en el paso 5 del repositorio del profesor) y, si `strace` está
 instalado, el script también corre `strace -c`.
 
+Promedio de 3 corridas (100.000 mmap por corrida; archivo de 4 MB):
+
 | Caso | mmap+munmap (ns) | page fault (ns) | page faults contados |
 |------|------------------|-----------------|----------------------|
-| A. sin módulo | <!-- llenar --> | <!-- llenar --> | <!-- llenar --> |
-| B. con módulo, archivo no protegido | <!-- llenar --> | <!-- llenar --> | <!-- llenar --> |
-| C. con módulo, archivo protegido | <!-- llenar --> | <!-- llenar --> | <!-- llenar --> |
+| A. sin módulo | 2152 | 2275 | 320 |
+| B. con módulo, archivo no protegido | 2171 (+0.9%) | 2291 (+0.7%) | 320 |
+| C. con módulo, archivo protegido | 2358 (+9.6%) | 2416 (+6.2%) | 320 |
 
-Overhead = (C − A) / A. <!-- llenar con el resultado y comentarlo -->
+Overhead = (C − A) / A: **+9.6% en mmap()** (unos 200 ns) y **+6.2% en page faults**.
+Para archivos no protegidos (B) el impacto es menor al 1%, dentro del ruido
+entre corridas.
 
 Lo que esperamos ver, según lo que hace el código. El trabajo extra por cada
 `mmap()` sobre un archivo protegido es:

@@ -8,14 +8,13 @@
 
 ¿Qué pasa desde `mmap()` hasta el primer page fault?
 
-1. El proceso llama `mmap()` y la CPU pasa de modo usuario (Ring 3) a modo
-   kernel (Ring 0).
+1. El proceso llama `mmap()` y la CPU pasa de modo usuario a modo
+   kernel.
 2. El kernel primero llama al hook de seguridad `security_mmap_file()` (ahí se
    engancha nuestro módulo). Si lo permite, crea una `vm_area_struct` (VMA):
    una estructura que describe la región (dónde empieza, tamaño, permisos y
-   qué archivo es). **No copia el archivo a memoria todavía.**
-3. `mmap()` devuelve una dirección, pero la tabla de páginas aún no tiene
-   entradas (PTE) para esa zona.
+   qué archivo es).
+3. `mmap()` devuelve una dirección.
 4. Cuando el proceso lee o escribe ahí por primera vez, la MMU (el hardware que
    traduce direcciones) no encuentra la traducción y lanza un **page fault**.
 5. El kernel atiende el fallo en `handle_mm_fault()`:
@@ -33,9 +32,7 @@ por el kernel. Por eso el control hay que ponerlo en el `mmap()`.
 
 ## 2. `MAP_SHARED` vs. `MAP_PRIVATE`
 
-La diferencia queda guardada en la VMA (`vm_flags`):
-
-- **`MAP_SHARED`**: el proceso escribe directamente sobre las páginas del
+- **`MAP_SHARED`**: Este escribe directamente sobre las páginas del
   archivo. Los cambios **llegan al disco** y otros procesos los ven.
 - **`MAP_PRIVATE`**: si el proceso escribe, el kernel le hace una **copia
   propia** de la página (Copy-On-Write). El archivo no cambia y nadie más ve
@@ -43,6 +40,8 @@ La diferencia queda guardada en la VMA (`vm_flags`):
 
 Para la seguridad, `MAP_SHARED` con escritura es el peligroso, porque modifica
 el archivo de verdad. Por eso nuestro módulo siempre lo bloquea.
+
+*** `SHARED toca el archivo real (peligroso) y PRIVATE trabaja sobre una copia (el archivo no cambia).`***
 
 ---
 
@@ -53,7 +52,7 @@ el archivo de verdad. Por eso nuestro módulo siempre lo bloquea.
 2. Cuando intenta escribir, salta un page fault.
 3. El kernel copia la página, y el proceso escribe en su copia.
 
-**Cómo se vuelve peligroso:** si el kernel se confunde y escribe en la página
+**Cómo se vuelve peligroso:** Si el kernel se confunde y escribe en la página
 original en vez de la copia, se puede modificar un archivo protegido. Eso pasó
 con **Dirty COW (CVE-2016-5195)**: con una carrera entre dos hilos (uno
 escribiendo por `/proc/self/mem` y otro botando la copia con `madvise`), el
@@ -65,17 +64,12 @@ verificando que la página donde se va a escribir sea de verdad la copia.
 
 ## 4. Syscall table vs. LSM
 
-- **Módulo que modifica la System Call Table:** se reemplaza la función de
-  `mmap` por una propia. Es frágil: hay que desactivar una protección de la CPU
-  (el bit WP del registro CR0), la tabla ya no se exporta y se rompe entre
-  versiones. Es lo que hacen los rootkits.
-- **LSM (Linux Security Module):** el kernel ya trae puntos oficiales para
-  seguridad (los usan SELinux y AppArmor), como el hook de `mmap`. Es estable y
-  seguro, pero normalmente hay que compilarlo dentro del kernel.
-
-**Nosotros** usamos un punto intermedio: un módulo con **kretprobe** sobre el
-hook LSM `security_mmap_file()`. Usamos el punto oficial sin recompilar el
-kernel.
+La pregunta es en qué punto del camino de mmap() dentro del kernel ponemos el portero 
+(nuestro módulo, que revisa cada mmap() que pide un programa). 
+Opción A: en la syscall table (cambiar la tabla), que es inseguro y lo que hacen los rootkits. 
+Opción B: en la ventanilla oficial de seguridad, security_mmap_file() (LSM), que es segura pero 
+normalmente hay que compilarla dentro del kernel. Nosotros pusimos el portero en la ventanilla 
+oficial (B), pero enganchado con un kretprobe desde un módulo, para no recompilar el kernel.
 
 ---
 
@@ -84,10 +78,6 @@ kernel.
 Si el archivo está cifrado en disco, el kernel lo descifra **cuando lo trae a
 memoria** (en el page fault), antes de dárselo al proceso. Así el proceso ve
 el texto claro y en el disco sigue cifrado. Linux ya hace esto con `fscrypt`.
-
-El cuidado está en que solo el proceso autorizado tenga esa página descifrada
-en su memoria, y que al liberarla se borre. Nuestro proyecto **no cifra**;
-solo controla quién puede mapear el archivo.
 
 ---
 

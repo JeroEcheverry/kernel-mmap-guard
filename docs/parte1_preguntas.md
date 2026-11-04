@@ -78,6 +78,9 @@ oficial (B), pero enganchado con un kretprobe desde un módulo, para no recompil
 Si el archivo está cifrado en disco, el kernel lo descifra **cuando lo trae a
 memoria** (en el page fault), antes de dárselo al proceso. Así el proceso ve
 el texto claro y en el disco sigue cifrado. Linux ya hace esto con `fscrypt`.
+El cuidado está en que solo el proceso autorizado tenga la página descifrada en 
+su memoria, y que se borre al liberarla. Nuestro proyecto no cifra; solo controla 
+quién mapea el archivo
 
 ---
 

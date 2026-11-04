@@ -5,17 +5,19 @@
 Usamos un asistente de IA como apoyo, pero **verificando todo** contra el
 código del kernel y probándolo en nuestra máquina.
 
-- **Para entender la arquitectura:** le pedimos que nos explicara las opciones
-  para vigilar `mmap()` (syscall table, LSM, kprobes). Después lo confirmamos
-  en los headers del kernel.
-- **Para el código en C:** nos dio el esqueleto del kretprobe. Tenía errores
-  (ver alucinaciones), así que lo revisamos función por función y lo
+- **Para entender la arquitectura:** Le pedimos que nos explicara las opciones
+  para vigilar `mmap()` (syscall table, LSM, kprobes). 
+
+- **Para el código en C:** Nos dio el esqueleto del kretprobe. Tenía errores
+  (ver alucinaciones), así que se volvio a revisar y lo
   compilamos con `-Wall -Werror`.
-- **Para las pruebas (PoC):** nos ayudó a listar qué ataques probar. Con eso
+
+- **Para las pruebas:** Nos ayudó a listar qué ataques probar. Con eso
   hicimos `prueba_mmap.c`, `prueba_python.py` y `carrera.c`. **Sin el módulo**,
-  un usuario normal logra modificar el archivo (queda `HACKEADO`); **con el
-  módulo**, los mismos programas reciben "permiso denegado". Son pruebas
+  un usuario normal logra modificar el archivo (queda `HACKEADO`); con el
+  módulo, los mismos programas reciben "permiso denegado". Son pruebas
   controladas: solo atacan un archivo de prueba.
+
 - **Para la revisión final:** le pedimos revisar todo contra la rúbrica.
   Encontró cosas que faltaban y nos ayudó a compilar y medir en WSL2. También
   se equivocó varias veces (ver abajo).
@@ -44,16 +46,16 @@ código del kernel y probándolo en nuestra máquina.
    tiene 4. Lo verificamos en `include/linux/mm.h`.
 4. **`file_operations` para `/proc`.** En kernels nuevos se usa `proc_ops`.
 
+**Para eso nos ayudamos de otra IA, e ibamos mirando que cosas no cuadraban**
+
 ### Errores de la IA que encontramos al probar
 
-5. **Filtrar ftrace por pid.** No salían datos. Al revisar a mano vimos que el
+1. **Filtrar ftrace por pid.** No salían datos. Al revisar a mano vimos que el
    mismo proceso tenía un pid en la terminal (31123) y otro en el kernel
    (31478), porque WSL2 usa su propio "espacio de pids". Lo cambiamos a
    filtrar por nombre del proceso.
-6. **ftrace mal configurado.** Enganchaba todas las funciones del kernel y hacía
-   que todo fuera 4 veces más lento, dañando la medición. Lo limitamos a las 2
-   funciones que nos interesan.
-7. **Conclusión apresurada.** Dijo que en archivos no protegidos el costo era
+
+2. **Conclusión apresurada.** Dijo que en archivos no protegidos el costo era
    "menor al 1%". ftrace mostró que sí hay costo (~100 ns). Aprendimos a usar
    la mediana y a confirmar con dos herramientas.
 
@@ -70,13 +72,6 @@ y `false` son palabras reservadas, y el kernel 6.6 las define él mismo. Una
 parte del kernel no compilaba. Lo arreglamos agregando `-std=gnu11` en
 `arch/x86/Makefile`.
 
-**Para cada cambio del módulo:**
-
-1. Revisar la firma real de la función en el código del kernel.
-2. Compilar con `-Wall -Werror` (cualquier warning detiene todo).
-3. Cargar con `insmod` y revisar `dmesg`.
-4. Correr `sudo make test`.
-5. Descargar con `rmmod`.
 
 
 ### Matriz de compensaciones

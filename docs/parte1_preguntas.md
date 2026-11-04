@@ -84,33 +84,26 @@ el texto claro y en el disco sigue cifrado. Linux ya hace esto con `fscrypt`.
 ## 6. `msync` / `fsync` y páginas sucias
 
 Cuando un proceso escribe en un mapeo `MAP_SHARED`, el cambio queda primero en
-memoria y la página se marca como **sucia** (modificada). Para saberlo, el
-kernel se entera de la **primera** escritura en cada página (por un page
+memoria y la página se marca como sucia (modificada). Para saberlo, el
+kernel se entera de la primera escritura en cada página (por un page
 fault), pero **no de las siguientes ni de qué se escribió**.
 
 La página se guarda en disco más tarde: sola (hilos del kernel llamados
 *writeback*) o cuando el proceso llama `msync()` o `fsync()`.
 
-**El problema:** un filtro que revise solo en `write()` o `fsync()` no ve las
-escrituras al mapeo, porque no pasan por `write()`. El dato llega al disco sin
-que nadie lo revise. Por eso hay que decidir en el `mmap()` si se permite
-escribir o no.
-
 ---
 
 ## 7. eBPF
 
-eBPF permite cargar programas pequeños dentro del kernel sin recompilarlo. Un
-verificador los revisa antes, así que no pueden tumbar el sistema. Para
-`mmap()` se puede:
+eBPF permite cargar programas pequeños dentro del kernel mientras está corriendo, 
+sin recompilarlo. Se usa para observar lo que pasa en el sistema y para aplicar reglas 
+de seguridad. Antes de cargarlo, un verificador revisa que el programa no pueda dañar 
+el kernel, como ciclos infinitos ni accesos a memoria inválida.
 
-- poner un **kprobe** a la entrada de `security_mmap_file()` y registrar quién
-  mapea qué archivo y con qué permisos;
-- poner un **fexit** a la salida para ver si funcionó;
-- con **BPF-LSM**, incluso negar la operación.
-
-Nosotros usamos un módulo en C porque era más directo para aprender, pero la
-misma idea se podría hacer con eBPF.
+Para vigilar mmap(), un programa eBPF puede poner un kprobe, una especie de espía, 
+en security_mmap_file(), la función por donde pasan todos los mmap(). Así anota qué 
+proceso mapea qué archivo y con qué permisos. Con un fexit (a la salida de la función)
+ se ve si se permitió o no, y con BPF-LSM se podría incluso negar.
 
 ---
 
@@ -118,9 +111,9 @@ misma idea se podría hacer con eBPF.
 
 **Sí se puede.** Si abro un archivo en solo lectura, igual puedo mapearlo con
 `MAP_PRIVATE` y permiso de escritura. El kernel lo permite porque lo que
-escribo va a mi **copia privada** (COW), no al archivo.
+escribo va a mi copia privada, no al archivo.
 
-El riesgo: mi proceso tiene en memoria una versión alterada del archivo, que
+El riesgo es que si mi proceso tiene en memoria una versión alterada del archivo, que
 podría filtrarse o usarse para engañar a otro programa. Por eso nuestro
 "modo estricto" también bloquea este caso.
 
@@ -128,31 +121,24 @@ podría filtrarse o usarse para engañar a otro programa. Por eso nuestro
 
 ## 9. Carreras entre `madvise(MADV_DONTNEED)` y escrituras
 
-`madvise(MADV_DONTNEED)` bota las páginas de un mapeo. En un mapeo privado,
-eso borra la copia COW. Ese era el truco de Dirty COW: botar la copia justo
-cuando el kernel iba a escribir.
-
-El kernel actual lo evita con **bloqueos (locks)** sobre la tabla de páginas, y
-verificando que la página sea la copia antes de escribir. Si la copia
-desapareció, hace una nueva.
-
-Nuestra prueba `carrera.c` hace algo parecido pero inofensivo: un hilo escribe
-en la copia privada y otro llama `madvise` sin parar. Al final, el archivo
-quedó intacto.
+Una condición de carrera es cuando dos cosas pasan al mismo tiempo y el resultado 
+depende del orden. madvise(MADV_DONTNEED) bota la copia privada de COW; si eso se
+cruza con una escritura, el kernel podría escribir en el original (Dirty COW). 
+Hoy lo evita con dos cosas: candados sobre la tabla de páginas, las dos operaciones 
+esperan su turno, y verificar que la página sea la copia antes de escribir; 
+si la copia ya no existe, hace una nueva. Nuestra prueba carrera.c cruza millones 
+de veces escrituras y madvise durante 3 segundos, y el archivo queda intacto.
 
 ---
 
 ## 10. Aislamiento de memoria
 
-- **Tablas de páginas** (PGD → P4D → PUD → PMD → PTE): cada proceso tiene las
-  suyas, así que la misma dirección en dos procesos apunta a memoria física
-  distinta. Ese es el aislamiento básico.
-- **`struct page`**: el kernel tiene una por cada página física para saber
-  quién la usa y si está modificada.
-- **Bits de protección de cada PTE**:
-  - **R/W**: si se puede escribir o solo leer (COW se apoya en esto).
-  - **U/S**: si el código de usuario puede tocarla o solo el kernel.
-  - **NX**: si se puede ejecutar código desde ahí.
+Cada proceso vive en su propia burbuja de memoria. Lo logran tres piezas:
 
-Nuestro módulo bloquea `PROT_EXEC` sobre los archivos protegidos para
-apoyarse en el bit NX: así nadie puede usar ese archivo para ejecutar código.
+Tabla de páginas, que es el mapa propio de cada proceso, que traduce sus direcciones 
+a la RAM real. La misma dirección en dos procesos apunta a lugares distintos, así 
+que uno no puede tocar la memoria de otro. Tiene niveles (PGD → P4D → PUD → PMD → PTE), 
+como una dirección postal. La PTE dice dónde está cada página y con qué permisos.
+
+struct page, quien es la libreta del kernel, con una hoja por cada página de la RAM. Anota 
+quién la usa y si está sucia, para no darle a un proceso una página que ya es de otro.
